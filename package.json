@@ -1,0 +1,48 @@
+{
+  "name": "dsh-whale-whispers",
+  "version": "1.3.0",
+  "private": false,
+  "author": "鹿野 <luye@dsh.local>",
+  "license": "MIT",
+  "description": "有些话说出口就沉下去了。鲸语把它们捞回来，收进输入框下面的小抽屉——等你想再听时，点开就能听到。",
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-layout"
+      ]
+    }
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "quotes",
+    "whale",
+    "memory"
+  ],
+  "homepage": "https://github.com/heiyedehen/dsh-whale-whispers",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/heiyedehen/dsh-whale-whispers.git"
+  }
+}
