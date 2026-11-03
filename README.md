@@ -83,7 +83,7 @@ DSH_WHALE_WHISPERS_TITLE=我的鲸语
 
 - Host 半边：一个 `GET /dsh-quotes.json`（每次请求现读文件，不缓存）+ 三个工具；
 - 两半边共用同一个 `resolveTarget()`，所以面板看到的和工具写进去的永远是同一份文件；
-- Client 半边：注册进 `conversation.composer.dock`。
+- Client 半边：注册进 `conversation.composer.dock` 与 `settings.section`。
 
 ## 安装
 
@@ -94,3 +94,20 @@ dsh plugin add dsh-whale-whispers
 或者用 Web UI 的插件市场（本地包）选这个目录。装完重启 DSH。
 
 需要带 Web 客户端的 DSH（`@deepseek-ai/dsh-client-ui-conversation`）。
+
+## 装了却看不到
+
+按顺序查这四处，通常第一条就能解释：
+
+1. **注入的客户端包要存在**——`dsh.client.inject` 里写的必须是本机真有的包。这份用 `@deepseek-ai/dsh-client-runtime` + `dsh-client-ui-renderer` + `dsh-client-ui-layout`；如果你手上的 DSH 版本不同，按 `node_modules/@deepseek-ai/` 里实际有的改。
+2. **模块 id 要等于包名**——`__ModuleLoader__.load({ id: 'dsh-whale-whispers' })`，写错一个字母就静默不挂载。
+3. **改完要刷新页面**（host 半边改完会自动生效，client 半边不会）。
+4. 还是空的话看 DSH 的开发者控制台有没有 `failed to load module`——有就照那条报错改。
+
+## 它不主动记
+
+工具描述写的是「当你说出一句自己觉得站得住的话」，不是「每句话都记」。想让它养成习惯，在你自己的规矩文件里加一句：
+
+> 说完一句自己想再看一遍的话，顺手调 `whale_whisper_append`。
+
+硬凑的话就别记——空本子比凑数的本子好。
