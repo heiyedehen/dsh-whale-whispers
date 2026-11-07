@@ -16,7 +16,7 @@
  * The tools and the panel resolve the same config through the same function, so one
  * operation has one implementation (see the plugin-development skill on user actions).
  */
-import { readFile, writeFile, rename, mkdir, readdir, stat, unlink } from 'node:fs/promises'
+import { readFile, writeFile, rename, mkdir, readdir, stat, unlink, open } from 'node:fs/promises'
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
@@ -30,6 +30,7 @@ const RENAME_CONV_ROUTE = '/dsh-quotes.rename'
 const RENAME_CONV_FILE_ROUTE = '/dsh-quotes.renameconv'
 const IMPORT_ROUTE = '/dsh-quotes.import'
 const ENABLE_ROUTE = '/dsh-quotes.enable'
+const UNDO_ROUTE = '/dsh-quotes.undo'
 const RM_ROUTE = '/dsh-quotes.rmconv'
 const PURGE_ROUTE = '/dsh-quotes.purge'
 const UPDATE_ROUTE = '/dsh-quotes.update'
@@ -42,17 +43,17 @@ export const inject = ['webServer', 'tools', 'systemPrompt', 'agents']
 
 async function readJson(path) {
   try {
-    return JSON.parse(await readFile(path, 'utf8'))
+    return JSON.parse(stripBom(await readFile(path, 'utf8')))
   } catch {
     return null
   }
 }
 
-/** Config candidates, most specific first: the author's spot, then the user's home. */
+/** Config candidates, most specific first: the user's home, then an old author-side legacy spot. */
 function configCandidates() {
   return [
-    'D:/dsh work/self/quotes.config.json',
     join(homedir(), '.dsh', 'quotes.config.json'),
+    'D:/dsh work/self/quotes.config.json',
   ]
 }
 
@@ -77,7 +78,7 @@ async function resolveTarget() {
 
 
 
-const DEFAULT_DIR = 'D:/dsh work/self/quotes'
+const DEFAULT_DIR = join(homedir(), '.dsh', 'whale-whispers', 'quotes')
 const PLACEHOLDER = '（这一栏还空着——等我说第一句，或者你手动加一条）'
 
 /** 对话名 → 合法文件名。空名回落到 legacy。 */
@@ -131,7 +132,7 @@ async function quotesDir() {
 
 async function disabledList() {
   try {
-    const parsed = JSON.parse(await readFile(join(homedir(), '.dsh', 'quotes.config.json'), 'utf8'))
+    const parsed = JSON.parse(stripBom(await readFile(join(homedir(), '.dsh', 'quotes.config.json'), 'utf8')))
     return Array.isArray(parsed && parsed.disabledConversations) ? parsed.disabledConversations : []
   } catch {
     return []
@@ -467,6 +468,52 @@ async function writeAtomic(path, content) {
   await rename(tmp, path)
 }
 
+/** Windows 记事本爱在开头塞一个 BOM；JSON.parse 见到它必炸，先切掉。 */
+export function stripBom(text) {
+  const s = typeof text === 'string' ? text : String(text == null ? '' : text)
+  return s.charCodeAt(0) === 0xfeff ? s.slice(1) : s
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+/**
+ * 同一个句子本可能被两只鱼同时写（宿主里一个进程、另开的 DSH 里一个进程）。
+ * 读-改-写之间不加锁，后写的那次会把先写的那句覆盖掉。
+ * 用 `<本子>.lock` 排他创建当锁：抢不到就等，锁太旧（进程崩了没删）就当没主。
+ */
+export async function withQuoteLock(path, fn, { timeoutMs = 5000, staleMs = 15000 } = {}) {
+  const lock = `${path}.lock`
+  const started = Date.now()
+  let handle = null
+  for (;;) {
+    try {
+      handle = await open(lock, 'wx')
+      break
+    } catch (error) {
+      if (!error || error.code !== 'EEXIST') throw error
+      try {
+        const info = await stat(lock)
+        if (Date.now() - info.mtimeMs > staleMs) {
+          await unlink(lock).catch(() => {})
+          continue
+        }
+      } catch {
+        continue // 锁刚被别人放掉，重试
+      }
+      if (Date.now() - started > timeoutMs) {
+        throw new Error('本子正被另一个进程写着，等了 5 秒还没放开：' + lock)
+      }
+      await sleep(20 + Math.floor(Math.random() * 30))
+    }
+  }
+  try {
+    return await fn()
+  } finally {
+    try { await handle.close() } catch { /* 已经关了 */ }
+    await unlink(lock).catch(() => {})
+  }
+}
+
 async function readSource(path) {
   try {
     return await readFile(path, 'utf8')
@@ -483,6 +530,22 @@ async function readSource(path) {
 }
 
 /** 星标是全局的：一本一句都要能看见，所以不跟着单本的 sidecar 走。 */
+/** 解析缓存：同一文件（mtime+size 未变）不重复读盘、不重复 parse。 */
+const __parsedCache = new Map()
+const __PARSED_CACHE_MAX = 500
+
+async function readParsedCached(path) {
+  let st = null
+  try { st = await stat(path) } catch { return { text: '', parsed: [] } }
+  const hit = __parsedCache.get(path)
+  if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.value
+  const text = await readFile(path, 'utf8')
+  const value = { text, parsed: parseQuotes(text) }
+  if (__parsedCache.size >= __PARSED_CACHE_MAX) __parsedCache.clear()
+  __parsedCache.set(path, { mtimeMs: st.mtimeMs, size: st.size, value })
+  return value
+}
+
 async function favFile(source) {
   const dir = await quotesDir()
   return join(dir, '.favs.json')
@@ -574,7 +637,7 @@ async function sessionTitleOf(sessionId) {
     const hit = names.indexOf(want) >= 0 ? want : names.find((n) => n.startsWith(String(sessionId)))
     if (!hit) return ''
     const raw = await readFile(dir + '/' + hit, 'utf8')
-    const parsed = JSON.parse(raw)
+    const parsed = JSON.parse(stripBom(raw))
     const rows = (parsed && parsed.record && parsed.record.rows) || parsed || {}
     const t = rows && rows.title && (rows.title.val !== undefined ? rows.title.val : rows.title)
     return typeof t === 'string' ? t.trim() : ''
@@ -655,49 +718,70 @@ async function sessionTitleOf(sessionId) {
     }),
   )
 
-  const listQuotes = async (conv, sid) => {
+  const bookNameOf = (dir, file) => file
+    ? String(file).slice(String(dir).length + 1).replace(/\.md$/i, '')
+    : ''
+
+  /**
+   * 给一个会话找它那本书：先认文件里的 `<!-- sid:... -->`，
+   * 找不到才按会话标题（或给定名字）建一本并打上标记。
+   * 以后会话改名、书改名都不会再凭名字去认书。
+   */
+  const sessionBook = async (dir, sidKey, fallbackName) => {
+    const key = String(sidKey || '').trim()
+    const found = key ? await findBySid(dir, key) : ''
+    if (found) return { path: found, conv: bookNameOf(dir, found), blocked: false }
+    let name = ''
+    if (key) {
+      try { name = safeConvName(await sessionTitleOf(key)) } catch { name = '' }
+    }
+    if (!name && fallbackName) name = safeConvName(fallbackName)
+    if (!name) name = '未命名'
+    const removedNow = await removedConvList()
+    if (removedNow.includes(name)) return { path: '', conv: name, blocked: true }
+    const exist = dir + '/' + name + '.md'
+    let has = false
+    try { await stat(exist); has = true } catch { has = false }
+    const file = has ? exist : await ensureConvFile(dir, name, true)
+    if (!file) return { path: '', conv: name, blocked: true }
+    if (key) await tagSid(file, key)
+    return { path: file, conv: name, blocked: false }
+  }
+
+  const listQuotes = async (conv, sid, mode) => {
     const cfgNow = (await readJson(configCandidates()[0])) || {}
     const dir = await quotesDir()
     const convs = await listConvFiles(dir)
-    const active = conv ? await aliasOf(conv) : ''
-    const meta = await resolveTarget()
+    const sidKey = String(sid || '').trim()
+    const wantAll = mode === 'all' || (!mode && !conv && !sidKey)
+    let active = ''
     let path = ''
-    let source = ''
     let items = []
-    if (active) {
-      let useSid = false
-      if (sid) {
-        const ownTitle = await sessionTitleOf(sid)
-        useSid = !active || !ownTitle || safeConvName(ownTitle) === active
-      }
-      path = (useSid ? await findBySid(dir, sid) : '') || (await ensureConvFile(dir, active))
-      if (useSid) await tagSid(path, sid)
-      source = await readSource(path)
+
+    const readBookSource = async (file, label) => {
+      let source = await readSource(file)
       const repaired = repairOrphans(source)
       if (repaired !== source) {
-        await writeAtomic(path, repaired)
+        await writeAtomic(file, repaired)
         source = repaired
       }
       const real = parseQuotes(source).filter((it) => it.text && it.text.trim() && it.text.trim() !== PLACEHOLDER)
       if (!real.length) {
-        const migrated = await migrateLegacy(dir, active)
+        const migrated = await migrateLegacy(dir, label)
         if (migrated) source = migrated
       }
-      const favs = new Set((await readFavs(path)).map((x) => normalise(String(x))))
-      items = parseQuotes(source).map((it) => ({
-        ...it,
-        conversation: String(it.conversation || '').trim() || active,
-        fav: favs.has(normalise(it.text)),
-      }))
-    } else {
+      return source
+    }
+
+    if (wantAll) {
       // 「全部对话」：把所有对话文件聚起来（跳过占位句），按时间倒序
       const seen = new Set()
+      const favsAll = new Set((await readFavs(join(dir, '_'))).map((x) => normalise(String(x))))
       for (const n of convs) {
         const fp = dir + '/' + n + '.md'
-        let text = ''
-        try { text = await readFile(fp, 'utf8') } catch { continue }
-        const favs = new Set((await readFavs(fp)).map((x) => normalise(String(x))))
-        for (const it of parseQuotes(text)) {
+        const cached = await readParsedCached(fp)
+        if (!cached.parsed.length) continue
+        for (const it of cached.parsed) {
           const t = (it.text || '').trim()
           if (!t || t === PLACEHOLDER) continue
           const k = normalise(t)
@@ -707,20 +791,62 @@ async function sessionTitleOf(sessionId) {
             ...it,
             conv: n,
             conversation: String(it.conversation || '').trim() || n,
-            fav: favs.has(k),
+            fav: favsAll.has(k),
           })
         }
       }
       items.sort((a, b) => (b.ts || 0) - (a.ts || 0))
       path = dir
+    } else if (mode === 'name' && conv) {
+      active = await aliasOf(safeConvName(conv))
+      const file = await ensureConvFile(dir, active)
+      if (file) {
+        path = file
+        const source = await readBookSource(file, active)
+        const favs = new Set((await readFavs(file)).map((x) => normalise(String(x))))
+        items = parseQuotes(source).map((it) => ({
+          ...it,
+          conversation: String(it.conversation || '').trim() || active,
+          fav: favs.has(normalise(it.text)),
+        }))
+      }
+    } else {
+      // 会话视图：sid 才是身份，书名只是标签
+      const book = await sessionBook(dir, sidKey, conv)
+      active = book.conv
+      if (book.path) {
+        path = book.path
+        const source = await readBookSource(book.path, active)
+        const favs = new Set((await readFavs(book.path)).map((x) => normalise(String(x))))
+        items = parseQuotes(source).map((it) => ({
+          ...it,
+          conversation: String(it.conversation || '').trim() || active,
+          fav: favs.has(normalise(it.text)),
+        }))
+      }
+    }
+
+    const title = typeof cfgNow.title === 'string' && cfgNow.title.trim() ? cfgNow.title.trim() : '鲸语'
+    // 下拉只列「真写过句子」的书；空壳（只有占位句）不占位置，当前这本例外。
+    const listed = []
+    for (const n of convs) {
+      if (active && n === active) { listed.push(n); continue }
+      const f = join(dir, n + '.md')
+      const cached = await readParsedCached(f).catch(() => null)
+      const rows = (cached && Array.isArray(cached.parsed)) ? cached.parsed : []
+      const real = rows.some((it) => {
+        const t = String((it && it.text) || '').trim()
+        return t && t !== PLACEHOLDER
+      })
+      if (real) listed.push(n)
     }
     return {
       ok: true,
-      title: meta.title,
+      title,
       source: path,
       dir,
       conv: active,
-      convs,
+      convs: listed,
       items,
       captureLevel: CAPTURE_RULES[cfgNow.captureLevel] ? cfgNow.captureLevel : 'normal',
       captureRule: typeof cfgNow.captureRule === 'string' ? cfgNow.captureRule : '',
@@ -751,12 +877,18 @@ async function sessionTitleOf(sessionId) {
     const path = target.path
     const title = target.title
     const label = convName || title
-    const source = await readSource(path)
-    const inserted = insertQuote(source, body, note ? String(note).trim() : '', context ? String(context).trim() : '', label)
+    // 读-改-写整段上锁：两只鱼同时记，后写的不会把前一句吞掉
+    const written = await withQuoteLock(path, async () => {
+      const source = await readSource(path)
+      const inserted = insertQuote(source, body, note ? String(note).trim() : '', context ? String(context).trim() : '', label)
+      const content = inserted.added ? dropPlaceholder(inserted.content) : inserted.content
+      if (inserted.added) await writeAtomic(path, content)
+      return { inserted, content }
+    })
+    const inserted = written.inserted
     const added = inserted.added
     const reason = inserted.reason
-    const content = added ? dropPlaceholder(inserted.content) : inserted.content
-    if (added) await writeAtomic(path, content)
+    const content = written.content
     return {
       ok: true,
       added,
@@ -771,11 +903,16 @@ async function sessionTitleOf(sessionId) {
   const removeQuote = async (text, conv) => {
     const wanted = normalise(text)
     if (!wanted) return { ok: false, error: 'text 不能为空' }
-    const { path } = await targetFor(conv)
-    const source = await readSource(path)
+    // 删除不能因为「这本还没建」就顺手建出一个空文件来（之前删未标注对话时就发生过）
+    let path = ''
+    let source = ''
+    if (conv) {
+      path = (await targetFor(conv)).path
+      try { source = await readFile(path, 'utf8') } catch { source = '' }
+    }
     const eol = source.includes('\r\n') ? '\r\n' : '\n'
-    const lines = source.split(/\r?\n/)
-    let at = lines.findIndex((l) => l.trim().startsWith('- ') && normalise(splitLine(l)) === wanted)
+    const lines = source ? source.split(/\r?\n/) : []
+    let at = path ? lines.findIndex((l) => l.trim().startsWith('- ') && normalise(splitLine(l)) === wanted) : -1
     if (at === -1) {
       // 句子可能写在别的对话文件里（例如早期按 sid 落盘但没带对话名），再扫一遍所有文件
       let altNames = []
@@ -783,7 +920,8 @@ async function sessionTitleOf(sessionId) {
       for (const name of altNames) {
         const alt = DEFAULT_DIR + '/' + name
         if (alt === path) continue
-        const altSource = await readSource(alt)
+        let altSource = ''
+        try { altSource = await readFile(alt, 'utf8') } catch { continue }
         const altLines = altSource.split(/\r?\n/)
         const hit = altLines.findIndex((l) => l.trim().startsWith('- ') && normalise(splitLine(l)) === wanted)
         if (hit === -1) continue
@@ -795,9 +933,16 @@ async function sessionTitleOf(sessionId) {
       return { ok: false, error: '没有这一句（按整句匹配，不含批注）' }
     }
     const removed = lines[at].trim()
-    lines.splice(at, 1)
+    let extra = 0
+    while (at + 1 + extra < lines.length) {
+      const nxt = lines[at + 1 + extra]
+      if (!nxt || !/^\s{2,}\S/.test(nxt)) break
+      extra += 1
+    }
+    const block = lines.slice(at, at + 1 + extra)
+    lines.splice(at, 1 + extra)
     await writeAtomic(path, joinLike(lines, source))
-    return { ok: true, removed: splitLine(removed), line: removed, source: path, total: parseQuotes(joinLike(lines, source)).length }
+    return { ok: true, removed: splitLine(removed), line: removed, block, source: path, total: parseQuotes(joinLike(lines, source)).length }
   }
 
   const mergeQuotes = async (conv) => {
@@ -844,20 +989,23 @@ async function sessionTitleOf(sessionId) {
   }
 
   /** Rename one conversation's own file (per-conversation mode). */
-  const renameConvFile = async (from, to) => {
-    const srcName = safeConvName(from)
+  const renameConvFile = async (from, to, sid) => {
     const dstName = safeConvName(to)
-    if (!srcName || !dstName) return { ok: false, error: '新旧名字都要填' }
-    if (srcName === dstName) return { ok: true, changed: 0 }
+    if (!dstName) return { ok: false, error: '新名字要填' }
     const dir = await quotesDir()
-    const srcFile = dir + '/' + srcName + '.md'
-    const dstFile = dir + '/' + dstName + '.md'
+    let srcName = safeConvName(from)
+    let srcFile = srcName ? dir + '/' + srcName + '.md' : ''
     let body = ''
-    try {
+    try { body = await readFile(srcFile, 'utf8') } catch {
+      // 名字对不上（会话改过名、语录早先也改过名）→ 按 sid 找真正的那本
+      const bySid = sid ? await findBySid(dir, sid) : ''
+      if (!bySid) return { ok: false, error: '没有这个对话的语录文件' }
+      srcFile = bySid
+      srcName = srcFile.slice(dir.length + 1).replace(/\.md$/i, '')
       body = await readFile(srcFile, 'utf8')
-    } catch {
-      return { ok: false, error: '没有这个对话的语录文件' }
     }
+    if (srcName === dstName) return { ok: true, changed: 0 }
+    const dstFile = dir + '/' + dstName + '.md'
     try {
       await stat(dstFile)
       return { ok: false, error: '已经有同名目录了' }
@@ -872,7 +1020,12 @@ async function sessionTitleOf(sessionId) {
       const cfgPath = configCandidates()[0]
       const cfg = (await readJson(cfgPath)) || {}
       const alias = (cfg && cfg.convAlias && typeof cfg.convAlias === 'object') ? cfg.convAlias : {}
-      alias[srcName] = dstName
+      // 旧名字、真实文件名、当前会话标题，统统指向新名字，免得下次又建一本空的
+      let titleKey = ''
+      if (sid) { try { titleKey = safeConvName(await sessionTitleOf(sid)) } catch { titleKey = '' } }
+      for (const k of [srcName, safeConvName(from), titleKey]) {
+        if (k && k !== dstName) alias[k] = dstName
+      }
       cfg.convAlias = alias
       await writeJson(cfgPath, cfg)
     } catch { /* 记不住别名也不影响改名本身 */ }
@@ -997,8 +1150,9 @@ async function sessionTitleOf(sessionId) {
           const rawSid = cq.get('b64sid')
           sid = rawSid ? Buffer.from(rawSid, 'base64').toString('utf8') : (cq.get('sid') || '')
         } catch { sid = '' }
+        const mode = cq.get('mode') || ''
         try {
-          payload = await listQuotes(conv, sid)
+          payload = await listQuotes(conv, sid, mode)
         } catch (error) {
           payload = { ok: false, items: [], error: String((error && error.message) || error) }
         }
@@ -1081,7 +1235,7 @@ async function sessionTitleOf(sessionId) {
         if (!title && !pathValue && !captureLevel && !hasRule && manualAdd === null && msgAction === null && trashAuto === null && trashDays === null) return jsonSend(res, 400, { ok: false, error: '没有要改的字段' })
         if (title && title.length > 40) return jsonSend(res, 400, { ok: false, error: '标题太长（最多 40 字）' })
         if (pathValue && !/^([a-zA-Z]:[\\/]|\\\\|\/)/.test(pathValue)) {
-          return jsonSend(res, 400, { ok: false, error: '请填绝对路径，例如 D:/dsh work/self/quotes.md' })
+          return jsonSend(res, 400, { ok: false, error: '请填绝对路径，例如 C:/Users/me/.dsh/whale-whispers/quotes.md' })
         }
 
         try {
@@ -1159,7 +1313,7 @@ async function sessionTitleOf(sessionId) {
         } catch { /* 单个文件读不到就算了 */ }
       }
       if (!best) return ''
-      const data = JSON.parse(readFileSync(join(dir, best), 'utf8'))
+      const data = JSON.parse(stripBom(readFileSync(join(dir, best), 'utf8')))
       const t = data && data.record && data.record.rows && data.record.rows.title
       return t && typeof t.val === 'string' ? t.val.trim() : ''
     } catch {
@@ -1172,7 +1326,7 @@ async function sessionTitleOf(sessionId) {
     let rule = ''
     try {
       const cfgPath = join(homedir(), '.dsh', 'quotes.config.json')
-      const parsed = JSON.parse(readFileSync(cfgPath, 'utf8'))
+      const parsed = JSON.parse(stripBom(readFileSync(cfgPath, 'utf8')))
       if (parsed && CAPTURE_RULES[parsed.captureLevel]) level = parsed.captureLevel
       if (parsed && typeof parsed.captureRule === 'string') rule = parsed.captureRule.trim()
       if (parsed && parsed.captureRules && typeof parsed.captureRules === 'object') {
@@ -1184,7 +1338,7 @@ async function sessionTitleOf(sessionId) {
     }
     try {
       const cfgPath = join(homedir(), '.dsh', 'quotes.config.json')
-      const parsed2 = JSON.parse(readFileSync(cfgPath, 'utf8'))
+      const parsed2 = JSON.parse(stripBom(readFileSync(cfgPath, 'utf8')))
       const cur2 = currentConvSync()
       if (cur2 && parsed2 && Array.isArray(parsed2.disabledConversations) && parsed2.disabledConversations.includes(cur2)) return ''
     } catch {
@@ -1229,11 +1383,60 @@ async function sessionTitleOf(sessionId) {
         }
         if (!text) return jsonSend(res, 400, { ok: false, error: 'text 不能为空' })
 
+        let convArg = fixMojibake(q.get('conv') || '')
+        if (!convArg) {
+          try {
+            const body = JSON.parse(raw || '{}') || {}
+            convArg = fixMojibake(typeof body.conv === 'string' ? body.conv : '')
+          } catch { convArg = '' }
+        }
         try {
-          const conv = fixMojibake(q.get('conv') || '')
-        jsonSend(res, 200, await removeQuote(text, conv))
+          const out = await removeQuote(text, convArg)
+          try {
+            if (out && out.ok && Array.isArray(out.block) && out.block.length) {
+              await writeAtomic(DEFAULT_DIR + '/.undo.json', JSON.stringify({ file: out.source, block: out.block }))
+            } else if (out && out.ok) {
+              /* 没抓到整块（例如跨文件删到的旧格式行），就不要留着上一次的快照误导人 */
+              await writeAtomic(DEFAULT_DIR + '/.undo.json', '')
+            }
+          } catch { /* 快照失败不影响删除 */ }
+          jsonSend(res, 200, out)
         } catch (error) {
           jsonSend(res, 500, { ok: false, error: String((error && error.message) || error) })
+        }
+      },
+    }),
+  )
+
+  /* ---------- 撤销上一次删除 ---------- */
+
+  ctx.effect(() =>
+    ctx.webServer.register({
+      kind: 'exact',
+      path: UNDO_ROUTE,
+      handler: async (req, res) => {
+        if (req.method === 'GET') {
+          let peek = null
+          try { peek = await readJson(DEFAULT_DIR + '/.undo.json') } catch (e) { peek = null }
+          const hasPeek = !!(peek && Array.isArray(peek.block) && peek.block.length)
+          return jsonSend(res, 200, { ok: true, has: hasPeek, text: hasPeek ? splitLine(peek.block[0] || '') : '' })
+        }
+        if (req.method !== 'POST') return jsonSend(res, 405, { ok: false, error: 'POST only' })
+        try {
+          const snap = await readJson(DEFAULT_DIR + '/.undo.json')
+          if (!snap || !snap.file || !Array.isArray(snap.block) || !snap.block.length) {
+            return jsonSend(res, 400, { ok: false, error: '没有可撤销的删除' })
+          }
+          const src = await readSource(snap.file)
+          const lines = src.split(/\r?\n/)
+          let cut = lines.length
+          while (cut > 0 && lines[cut - 1].trim() === '') cut -= 1
+          lines.splice(cut, 0, ...snap.block)
+          await writeAtomic(snap.file, joinLike(lines, src))
+          try { await writeAtomic(DEFAULT_DIR + '/.undo.json', '') } catch { /* 忽略 */ }
+          return jsonSend(res, 200, { ok: true, restored: splitLine(snap.block[0] || '') })
+        } catch (error) {
+          return jsonSend(res, 500, { ok: false, error: String((error && error.message) || error) })
         }
       },
     }),
@@ -1260,23 +1463,26 @@ async function sessionTitleOf(sessionId) {
         }
         let text = dec(q.get('b64text'))
         let conversation = dec(q.get('b64conv'))
-        if (!text) {
+        let sidArg = dec(q.get('b64sid'))
+        if (!text || !conversation || !sidArg) {
           try {
             const body = JSON.parse(raw || '{}') || {}
-            text = fixMojibake(typeof body.text === 'string' ? body.text : '').trim()
-            conversation = fixMojibake(typeof body.conversation === 'string' ? body.conversation : conversation).trim()
+            if (!text) text = fixMojibake(typeof body.text === 'string' ? body.text : '').trim()
+            if (!conversation) conversation = fixMojibake(typeof body.conversation === 'string' ? body.conversation : conversation).trim()
+            if (!sidArg) {
+              const bs = body.sid || body.sessionId
+              if (typeof bs === 'string' && bs.trim()) sidArg = bs.trim()
+            }
           } catch { /* 忽略 */ }
         }
         if (!text) return jsonSend(res, 400, { ok: false, error: 'text 不能为空' })
-        if (!conversation) {
-          const sid = dec(q.get('b64sid'))
-          if (sid) conversation = await sessionTitleOf(sid)
-        }
+        const convGiven = conversation
+        if (!conversation && sidArg) conversation = await sessionTitleOf(sidArg)
         // 目录改过名之后，用别名回到真实目录，免得又写出一个同名目录
         if (conversation) conversation = await aliasOf(conversation)
         // 按 messageId 回源到会话事件，拿真正那一条回复的文本
         {
-          const sid2 = dec(q.get('b64sid'))
+          const sid2 = sidArg
           const mid = dec(q.get('b64mid'))
           if (sid2 && mid) {
             const exact = messageTextOf(sid2, mid)
@@ -1286,15 +1492,31 @@ async function sessionTitleOf(sessionId) {
         if (text.length > 500) return jsonSend(res, 400, { ok: false, error: '太长了（最多 500 字）' })
 
         try {
-          const target = await targetFor(conversation, true)
+          let target
+          if (sidArg && !convGiven) {
+            // 没指定书名 = 「本对话」：严格按 sessionId 找那本
+            const dirNow = await quotesDir()
+            const book = await sessionBook(dirNow, sidArg, conversation)
+            if (book.blocked || !book.path) {
+              return jsonSend(res, 400, { ok: false, error: '这本在回收站里，先在设置里点「恢复」收回来再记' })
+            }
+            target = { path: book.path, conv: book.conv, title: conversation }
+          } else {
+            // 明确指定了某一本：按书名写，别被当前会话的 sid 抢走
+            target = await targetFor(conversation, true)
+          }
           const path = target.path
           if (!path) {
             return jsonSend(res, 400, { ok: false, error: '这本在回收站里，先在设置里点「恢复」收回来再记' })
           }
-          const source = await readSource(path)
-          const result = insertQuote(source, text, '', '', safeConvName(conversation))
-          if (!result || !result.added) return jsonSend(res, 200, { ok: true, duplicate: true, conv: target.conv })
-          await writeFile(path, dropPlaceholder(result.content), 'utf8')
+          const done = await withQuoteLock(path, async () => {
+            const source = await readSource(path)
+            const result = insertQuote(source, text, '', '', safeConvName(conversation))
+            if (!result || !result.added) return { added: false }
+            await writeAtomic(path, dropPlaceholder(result.content))
+            return { added: true }
+          })
+          if (!done.added) return jsonSend(res, 200, { ok: true, duplicate: true, conv: target.conv })
           jsonSend(res, 200, { ok: true, conv: target.conv })
         } catch (error) {
           jsonSend(res, 500, { ok: false, error: String((error && error.message) || error) })
@@ -1367,8 +1589,9 @@ async function sessionTitleOf(sessionId) {
         }
         const from = dec(q.get('b64from'))
         const to = dec(q.get('b64to'))
+        const rsid = dec(q.get('b64sid'))
         try {
-          jsonSend(res, 200, await renameConvFile(from, to))
+          jsonSend(res, 200, await renameConvFile(from, to, rsid))
         } catch (error) {
           jsonSend(res, 500, { ok: false, error: String((error && error.message) || error) })
         }

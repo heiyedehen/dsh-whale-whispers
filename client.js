@@ -24,8 +24,9 @@ window.__ModuleLoader__.load({
 
       React.useEffect(() => {
         let alive = true
-        const params = []
-        if (convParam) params.push('conv=' + encodeURIComponent(convParam))
+        const mode = convParam === '__all__' ? 'all' : (convParam ? 'name' : 'session')
+        const params = ['mode=' + mode]
+        if (convParam && convParam !== '__all__') params.push('conv=' + encodeURIComponent(convParam))
         if (sidParam) params.push('b64sid=' + encodeURIComponent(b64(String(sidParam))))
         const url = '/dsh-quotes.json' + (params.length ? '?' + params.join('&') : '')
         fetch(url, { cache: 'no-store' })
@@ -35,6 +36,7 @@ window.__ModuleLoader__.load({
             setState({
               loading: false,
               title: (j && j.title) || '鲸语',
+              book: (j && j.conv) || '',
               source: (j && j.source) || '',
               items: (j && j.items) || [],
               disabled: (j && j.disabledConversations) || [],
@@ -58,7 +60,7 @@ window.__ModuleLoader__.load({
             }
           })
         return () => { alive = false }
-      }, [tick, convParam])
+      }, [tick, convParam, sidParam])
 
       const reload = React.useCallback(() => setTick((n) => n + 1), [])
       return { ...state, reload }
@@ -126,7 +128,7 @@ window.__ModuleLoader__.load({
 
     /* ---------- 改名 ---------- */
 
-    function Rename({ title, conv, onDone }) {
+    function Rename({ title, conv, sid, onDone }) {
       const [open, setOpen] = React.useState(false)
       const [value, setValue] = React.useState(conv || title)
       const [busy, setBusy] = React.useState(false)
@@ -139,6 +141,7 @@ window.__ModuleLoader__.load({
         try {
           const url = conv
             ? '/dsh-quotes.renameconv?b64from=' + encodeURIComponent(b64(conv)) + '&b64to=' + encodeURIComponent(b64(next))
+              + (sid ? '&b64sid=' + encodeURIComponent(b64(String(sid))) : '')
             : '/dsh-quotes.config?b64title=' + encodeURIComponent(b64(next))
           const r = await fetch(url, { method: 'POST' })
           const j = await r.json()
@@ -206,7 +209,7 @@ window.__ModuleLoader__.load({
                 style: S.inputWide,
                 value,
                 autoFocus: true,
-                placeholder: 'D:/dsh work/self/quotes.md',
+                placeholder: 'C:/Users/me/.dsh/whale-whispers/quotes.md',
                 onChange: (e) => setValue(e.target.value),
                 onKeyDown: (e) => {
                   if (e.key === 'Enter') save()
@@ -303,7 +306,7 @@ window.__ModuleLoader__.load({
       return parts
     }
 
-    function Item({ item, onChanged, showSource, conv, canDelete = true, q = '' }) {
+    function Item({ item, onChanged, onDeleted, showSource, conv, canDelete = true, q = '' }) {
       const [confirming, setConfirming] = React.useState(false)
       const [busy, setBusy] = React.useState(false)
       const [err, setErr] = React.useState('')
@@ -316,6 +319,7 @@ window.__ModuleLoader__.load({
           const j = await r.json()
           if (!j || j.ok !== true) throw new Error((j && j.error) || '删不掉')
           setConfirming(false); setBusy(false); setErr('')
+          onDeleted && onDeleted(item)
           onChanged && onChanged()
         } catch (e) {
           setErr(String((e && e.message) || e))
@@ -493,7 +497,8 @@ window.__ModuleLoader__.load({
   }, icon)
 }
 
-function Settings({ title = '', conv = '', removed = [], trash = [], trashAuto: trashAutoProp = false, trashDays: trashDaysProp = 30, items = [], source = '', disabled = [], level: levelProp, version = '', rule: ruleProp = '', convRule: convRuleProp = '', manualAdd: manualAddProp = true, msgAction: msgActionProp = true, onDone = () => {} }) {
+function Settings({ title = '', conv = '', book = '', removed = [], trash = [], trashAuto: trashAutoProp = false, trashDays: trashDaysProp = 30, items = [], source = '', disabled = [], level: levelProp, version = '', rule: ruleProp = '', convRule: convRuleProp = '', manualAdd: manualAddProp = true, msgAction: msgActionProp = true, convFiles: convFilesProp = [], onDone = () => {} }) {
+      if (!conv || conv === '__all__') conv = book || ''
       const LABEL = { conservative: '保守', normal: '正常', eager: '积极' }
       const [level, setLevel] = React.useState(typeof levelProp === 'string' ? levelProp : 'normal')
       const [busy, setBusy] = React.useState('')
@@ -518,13 +523,9 @@ function Settings({ title = '', conv = '', removed = [], trash = [], trashAuto: 
       const [msgBusy, setMsgBusy] = React.useState(false)
       const [manualBusy, setManualBusy] = React.useState(false)
       const convs = React.useMemo(() => {
-        const seen = []
-        ;(items || []).forEach((it) => {
-          const name = (it && it.conversation) || ''
-          if (seen.indexOf(name) < 0) seen.push(name)
-        })
-        return seen.sort((x, y) => (x || '').localeCompare(y || ''))
-      }, [items])
+        const list = (convFilesProp || []).filter((n) => n && removedList.indexOf(n) < 0)
+        return Array.from(new Set(list)).sort((x, y) => String(x).localeCompare(String(y)))
+      }, [convFilesProp, removedList])
       const fileRef = React.useRef(null)
       const say = (text, where) => {
         setMsg(text)
@@ -625,10 +626,10 @@ function Settings({ title = '', conv = '', removed = [], trash = [], trashAuto: 
             h('div', { style: { fontSize: 14, fontWeight: 600 } }, '鲸语设置'),
             h('span', { style: { flex: 1 } }),
             h('button', { type: 'button', style: S.btn, onClick: onDone }, '关闭')),
-          h('div', { style: { ...S.dim, fontSize: 11.5, marginBottom: 8 } }, '文件：' + source),
-          row('对话', convs.length
+          h('div', { style: { ...S.dim, fontSize: 11.5, marginBottom: 8 } }, (conv ? '当前这本：' + conv + ' · ' : '') + '文件：' + source),
+          row('对话', Array.from(new Set([].concat(convs || [], (convFilesProp || []).filter((n) => removedList.indexOf(n) < 0)))).length
             ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 170, overflow: 'auto', minWidth: 250 } },
-                convs.map((name) => {
+                Array.from(new Set([].concat(convs || [], (convFilesProp || []).filter((n) => removedList.indexOf(n) < 0)))).sort((a, b) => String(a).localeCompare(String(b))).map((name) => {
                   const on = off.indexOf(name) < 0
                   return h('div', { key: name || '__none', style: { display: 'flex', alignItems: 'center', gap: 8 } },
                     h('span', { style: { fontSize: 12, flex: 1 } },
@@ -660,7 +661,7 @@ function Settings({ title = '', conv = '', removed = [], trash = [], trashAuto: 
               accept: '.md,.txt',
               style: { fontSize: 12 },
               onChange: (e) => restore(e.target.files && e.target.files[0]),
-            })), '选一份之前备份的 .md 覆盖当前文件（旧文件会另存一份 .before-restore-…）'),
+            })), '选一份之前导出的 .md 覆盖这本；覆盖前会先把旧内容另存一份（文件名后面加 .before-restore-日期），后悔了还能找回来'),
           row('更新', h('span', { style: { display: 'flex', gap: 6, alignItems: 'center' } },
             h('button', { type: 'button', style: { ...S.btn, opacity: busy ? 0.6 : 1 }, onClick: check }, '检测更新'),
             h('button', { type: 'button', style: S.btn, onClick: copy }, '复制更新命令'),
@@ -977,28 +978,28 @@ function Settings({ title = '', conv = '', removed = [], trash = [], trashAuto: 
       const openSettings = !!(props && props.openSettings)
       const sessionId = (props && props.sessionId) || ''
       const [conv, setConv] = React.useState('')
-      const { loading, title, source, items, error, disabled, level, rule, convRule, captureRules, removed, trash, manualAdd, msgAction: msgActionCfg, trashAuto: trashAutoCfg, trashDays: trashDaysCfg, convs: convFiles, reload } = useQuotes(conv, sessionId)
+      const [undoItem, setUndoItem] = React.useState(null)
+      const [undoSnap, setUndoSnap] = React.useState('')
       React.useEffect(() => {
         let alive = true
-        const url = '/dsh-quotes.session' + (sessionId ? ('?b64sid=' + encodeURIComponent(b64(String(sessionId)))) : '')
-        fetch(url, { cache: 'no-store' })
+        fetch('/dsh-quotes.undo', { cache: 'no-store' })
           .then((r) => r.json())
-          .then((j) => {
-            if (!alive) return
-            const t = j && typeof j.title === 'string' ? j.title.trim() : ''
-            if (!t) return
-            setConv(t)
-            try { window.localStorage.setItem('dsh-whale-whispers:conv', t) } catch { /* 忽略 */ }
-          })
-          .catch(() => { /* 读不到就按老样子 */ })
+          .then((j) => { if (alive && j && j.has) setUndoSnap(String(j.text || '')) })
+          .catch(() => { /* 探不到就不显示 */ })
         return () => { alive = false }
-      }, [sessionId])
+      }, [])
+      React.useEffect(() => {
+        if (!undoItem) return undefined
+        const t = setTimeout(() => setUndoItem(null), 12000)
+        return () => clearTimeout(t)
+      }, [undoItem])
+      const { loading, title, book, source, items, error, disabled, level, rule, convRule, captureRules, removed, trash, manualAdd, msgAction: msgActionCfg, trashAuto: trashAutoCfg, trashDays: trashDaysCfg, convs: convFiles, reload } = useQuotes(conv, sessionId)
+      const allConv = conv === '__all__'
 
       const [q, setQ] = React.useState('')
       const [span, setSpan] = React.useState('all')
       const [spot, setSpot] = React.useState(null)
       const [onlyFav, setOnlyFav] = React.useState(false)
-      const [allConv, setAllConv] = React.useState(false)
       const [asc, setAsc] = React.useState(false)
       const [renaming, setRenaming] = React.useState(false)
       const [addOpen, setAddOpen] = React.useState(false)
@@ -1018,13 +1019,9 @@ function Settings({ title = '', conv = '', removed = [], trash = [], trashAuto: 
       const [convDraft, setConvDraft] = React.useState('')
 
       const convs = React.useMemo(() => {
-        const set = new Set(convFiles || [])
-        for (const it of items) {
-          const name = String(it.conversation || '').trim()
-          if (name) set.add(name)
-        }
+        const set = new Set((convFiles || []).filter((n) => n && removed.indexOf(n) < 0))
         return Array.from(set)
-      }, [items, convFiles])
+      }, [removed, convFiles])
       const rootRef = useRefreshWhenVisible(reload)
 
       const shown = React.useMemo(() => {
@@ -1036,7 +1033,6 @@ function Settings({ title = '', conv = '', removed = [], trash = [], trashAuto: 
             const ts = Number(it.ts) || Date.parse(String(it.date || '')) || 0
             if (ts < cutoff) return false
           }
-          if (!onlyFav && !allConv && !conv && false) return false
           if (!needle) return true
           return [it.text, it.note, it.context, it.conversation, it.date]
             .filter(Boolean).join(' ').toLowerCase().includes(needle)
@@ -1053,13 +1049,23 @@ function Settings({ title = '', conv = '', removed = [], trash = [], trashAuto: 
         const g = Array.from(map.entries()).reverse()
         const list = asc ? g.map(([k, v]) => [k, v.slice().reverse()]).reverse() : g
         // 「全部对话」下即使是空书也占一行，不然刚建好的书看起来像不存在
-        if (allConv && !conv) {
+        if (allConv) {
           for (const n of (convFiles || [])) {
             if (!list.some(([k]) => k === n)) list.push([n, []])
           }
         }
         return list
       }, [shown, asc, allConv, conv, convFiles])
+
+      React.useEffect(() => {
+        const onBack = () => { if (!document.hidden) reload() }
+        window.addEventListener('focus', onBack)
+        document.addEventListener('visibilitychange', onBack)
+        return () => {
+          window.removeEventListener('focus', onBack)
+          document.removeEventListener('visibilitychange', onBack)
+        }
+      }, [])
 
       if (loading) {
         return h('div', { ref: rootRef, style: { padding: '18px 22px', opacity: 0.65, fontSize: 13 } }, '读语录…')
@@ -1068,15 +1074,16 @@ function Settings({ title = '', conv = '', removed = [], trash = [], trashAuto: 
       return h('div', { ref: rootRef, style: S.wrap },
         h('div', { style: { ...S.head, justifyContent: 'space-between' } },
           h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 10 } },
-            h('h2', { style: S.title }, conv ? conv : '全部对话'),
+            h('h2', { style: S.title }, allConv ? '全部对话' : (book || title)),
             h('span', { style: S.count }, items.length
               ? items.length + ' 句 · 收藏 ' + items.filter((i) => i.fav === true).length
-                + (conv ? '' : ' · ' + (convFiles || []).length + ' 本')
+                + (allConv ? ' · ' + (convFiles || []).length + ' 本' : '')
               : '还没有')),
-          conv
+          book && conv !== '__all__'
             ? h(Rename, {
-                title,
-                conv,
+                title: book,
+                conv: book,
+                sid: sessionId,
                 onDone: (n) => {
                   if (n) {
                     try { window.localStorage.setItem('dsh-whale-whispers:conv', n) } catch { /* 忽略 */ }
@@ -1116,10 +1123,10 @@ function Settings({ title = '', conv = '', removed = [], trash = [], trashAuto: 
                 h('button', { type: 'button', style: S.btn, onClick: () => setSpot(null) }, '收起')))
           : null,
         h('div', { style: S.bar },
-          h(ExportBar, { title, items, name: conv || '鲸语' }),
+          h(ExportBar, { title, items, name: (conv === '__all__' || !book) ? '鲸语' : book }),
           manualAdd ? h('button', { type: 'button', style: S.btn, onClick: () => { setAddOpen(true); setAddMsg('') } }, '加一句') : null,
           h('select', {
-            value: conv,
+            value: conv || book || '',
             title: '按对话筛选',
             onChange: (e) => {
               const v = e.target.value
@@ -1128,7 +1135,7 @@ function Settings({ title = '', conv = '', removed = [], trash = [], trashAuto: 
             },
             style: { padding: '3px 6px', fontSize: 12, borderRadius: 6, border: '1px solid rgba(0,0,0,.18)', background: 'transparent', maxWidth: 150 },
           },
-            h('option', { value: '' }, '全部对话'),
+            h('option', { value: '__all__' }, '全部对话'),
             convs.map((name) => h('option', { key: name, value: name }, name))),
           h('input', {
             type: 'search',
@@ -1139,9 +1146,9 @@ function Settings({ title = '', conv = '', removed = [], trash = [], trashAuto: 
           }),
           h('button', {
             type: 'button',
-            title: allConv ? '现在连全对话一起搜，点一下只搜这本' : '现在只搜这本，点一下连全对话一起搜',
+            title: allConv ? '现在连所有对话一起搜，点一下只看这本' : '现在只看这本，点一下连所有对话一起搜',
             style: { ...S.btn, opacity: allConv ? 1 : 0.6 },
-            onClick: () => setAllConv((v) => !v),
+            onClick: () => setConv(allConv ? '' : '__all__'),
           }, allConv ? '搜全对话' : '搜本对话'),
           h('span', { style: { flex: 1 } }),
           h('button', {
@@ -1181,6 +1188,23 @@ function Settings({ title = '', conv = '', removed = [], trash = [], trashAuto: 
             onClick: () => setSettingsOpen(true),
           }, '设置'),
           h(PathEditor, { source, onDone: reload }),
+          (undoItem || undoSnap)
+            ? h('button', {
+                type: 'button',
+                style: { ...S.btn, color: '#b3261e' },
+                title: '撤销上一次删除：' + String((undoItem && undoItem.text) || undoSnap || '').slice(0, 40),
+                onClick: async () => {
+                  try {
+                    const r = await fetch('/dsh-quotes.undo', { method: 'POST' })
+                    const j = await r.json()
+                    if (!j || !j.ok) throw new Error((j && j.error) || '撤销失败')
+                    setUndoItem(null)
+                    setUndoSnap('')
+                    reload()
+                  } catch { /* 忽略 */ }
+                },
+              }, '撤销删除')
+            : null,
         null),
         error ? h('div', { style: { color: 'crimson', padding: '8px 0' } }, '读不到：' + error) : null,
         q.trim() ? h('div', { style: { ...S.dim, fontSize: 11.5, margin: '0 0 6px' } }, '筛出 ' + shown.length + ' / ' + items.length + ' 句') : null,
@@ -1199,7 +1223,7 @@ function Settings({ title = '', conv = '', removed = [], trash = [], trashAuto: 
                   style: { width: '100%', fontSize: 13, lineHeight: 1.6, padding: 8, borderRadius: 8, border: '1px solid rgba(0,0,0,.18)', background: 'transparent', resize: 'vertical' },
                 }),
                 h('div', { style: { ...S.dim, fontSize: 11.5, marginTop: 6 } },
-                  conv ? ('会记到「' + conv + '」下') : '没选对话，会记成「未标注对话」'),
+                  (conv && conv !== '__all__') ? ('会记到「' + conv + '」下') : '会记到当前对话那本'),
                 addMsg ? h('div', { style: { fontSize: 12, color: '#1a7f37', marginTop: 6 } }, addMsg) : null,
                 h('div', { style: { display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 12 } },
                   h('button', { type: 'button', style: S.btn, onClick: () => setAddOpen(false) }, '取消'),
@@ -1213,7 +1237,7 @@ function Settings({ title = '', conv = '', removed = [], trash = [], trashAuto: 
                         const res = await fetch('/dsh-quotes.add', {
                           method: 'POST',
                           headers: { 'content-type': 'application/json' },
-                          body: JSON.stringify({ text, conversation: conv || '' }),
+                          body: JSON.stringify({ text, conversation: (conv && conv !== '__all__') ? conv : '', sid: sessionId }),
                         })
                         const data = await res.json()
                         if (!data || !data.ok) throw new Error((data && data.error) || '没写进去')
@@ -1228,6 +1252,7 @@ function Settings({ title = '', conv = '', removed = [], trash = [], trashAuto: 
           ? h(Boundary, null, h(Settings, { level,
               title,
               conv,
+              book,
               removed,
               trash,
               items,
@@ -1237,21 +1262,22 @@ function Settings({ title = '', conv = '', removed = [], trash = [], trashAuto: 
               convRule,
               manualAdd,
               msgAction: msgActionCfg,
+              convFiles,
               trashAuto: trashAutoCfg,
               trashDays: trashDaysCfg,
               onDone: () => { setSettingsOpen(false); reload() },
             }))
           : null,
         groups.length === 0 && !error
-          ? h('div', { style: S.dim }, '还没有句子。点上面的「加一句」，或等它自己记。')
+          ? h('div', { style: S.dim }, '还没有句子。先跟它聊两句，它自己会记；也可以点上面的「加一句」。')
           : groups.map(([date, list]) =>
               h('div', { key: date },
                 date ? h('div', { style: S.date }, date + ((disabled || []).includes(date) ? ' · 未启用' : ((convFiles || []).includes(date) ? ' · 已启用' + (((captureRules || {})[date] || '').trim() ? ' · 单会话规则' : ' · 全局规则') : ''))) : null,
                 list.length === 0
-                  ? h('div', { style: { ...S.dim, padding: '2px 0 8px', fontSize: 12 } }, '（这本还没有句子，点上面的「加一句」或等它自己记）')
+                  ? h('div', { style: { ...S.dim, padding: '2px 0 8px', fontSize: 12 } }, '（这本还没有句子。先在这里聊两句，或者点「加一句」）')
                   : null,
                 list.slice().reverse().map((it, i) =>
-                  h(Item, { key: (date || '') + ':' + i, item: it, onChanged: reload, showSource: onlyFav, conv, canDelete: !onlyFav, q })))))
+                  h(Item, { key: (date || '') + ':' + i, item: it, onChanged: reload, onDeleted: (x) => setUndoItem(x), showSource: onlyFav, conv, canDelete: !onlyFav, q })))))
     }
 
     return {
