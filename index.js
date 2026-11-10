@@ -914,12 +914,19 @@ async function sessionTitleOf(sessionId) {
     const lines = source ? source.split(/\r?\n/) : []
     let at = path ? lines.findIndex((l) => l.trim().startsWith('- ') && normalise(splitLine(l)) === wanted) : -1
     if (at === -1) {
-      // 句子可能写在别的对话文件里（例如早期按 sid 落盘但没带对话名），再扫一遍所有文件
+      // 句子可能写在别的对话文件里（例如早期按 sid 落盘但没带对话名），再扫一遍所有文件。
+      // 不带 conv 时 append 写的是 config 里的 legacy 文件（resolveTarget），所以先认它；目录也要用 quotesDir()（会读 config），不能写死 DEFAULT_DIR。
+      const quoteDir = await quotesDir()
+      const legacyPath = (await resolveTarget()).path
+      const altPaths = []
+      if (legacyPath && legacyPath !== path) altPaths.push(legacyPath)
       let altNames = []
-      try { altNames = (await readdir(DEFAULT_DIR)).filter((n) => n.endsWith('.md')) } catch { altNames = [] }
+      try { altNames = (await readdir(quoteDir)).filter((n) => n.endsWith('.md')) } catch { altNames = [] }
       for (const name of altNames) {
-        const alt = DEFAULT_DIR + '/' + name
-        if (alt === path) continue
+        const alt = quoteDir + '/' + name
+        if (alt !== path && altPaths.indexOf(alt) === -1) altPaths.push(alt)
+      }
+      for (const alt of altPaths) {
         let altSource = ''
         try { altSource = await readFile(alt, 'utf8') } catch { continue }
         const altLines = altSource.split(/\r?\n/)
