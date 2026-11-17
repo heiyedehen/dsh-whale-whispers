@@ -406,7 +406,7 @@ function formatLine(text, note, context, conversation) {
  * Insert one line under `## <today>`; append the section if it does not exist yet.
  * Returns the new file content plus whether the line was actually added.
  */
-export function insertQuote(source, text, note, context, conversation) {
+export function insertQuote(source, text, note, context, conversation, dayKey) {
   // 多行正文会把 md 的一行拆成几行、也会让查重认不出来，先压成一行
   const oneLine = (v) => String(v == null ? '' : v).replace(/\s*\n+\s*/g, ' ').trim()
   const cleanText = oneLine(text)
@@ -421,7 +421,7 @@ export function insertQuote(source, text, note, context, conversation) {
 
   const eol = source.includes('\r\n') ? '\r\n' : '\n'
   const lines = source.split(/\r?\n/)
-  const day = todayKey()
+  const day = String(dayKey || '').trim() || todayKey()
   const header = `## ${day}`
   const at = lines.findIndex((l) => l.trim() === header)
 
@@ -602,7 +602,101 @@ const textOutput = {
   ],
 }
 
+/**
+ * 一次性把 config.path 那份旧单文件并进 dir 下各自的本子。
+ * 旧文件只读不写：迁完在配置里打 migratedLegacy 标记，之后任何工具都不再碰它。
+ */
+export async function migrateLegacyOnce() {
+  const cfgFile = configCandidates()[0]
+  const cfg = (await readJson(cfgFile)) || {}
+  if (cfg && cfg.migratedLegacy === true) return { ok: true, skipped: true }
+  const base = await resolveTarget()
+  const legacyPath = base.path
+  let body = ''
+  try { body = await readFile(legacyPath, 'utf8') } catch { body = '' }
+  const dir = await quotesDir()
+  const items = body ? parseQuotes(body) : []
+  const perBook = new Map()
+  for (const it of items) {
+    const name = safeConvName(it.conversation) || safeConvName(base.title) || '未命名'
+    if (!perBook.has(name)) perBook.set(name, [])
+    perBook.get(name).push(it)
+  }
+  let added = 0
+  let skipped = 0
+  for (const [name, rows] of perBook) {
+    const file = await ensureConvFile(dir, name, true)
+    if (!file) continue
+    const result = await withQuoteLock(file, async () => {
+      let source = await readSource(file)
+      const have = new Set(parseQuotes(source).map((q) => normalise(q.text)))
+      let n = 0
+      let dup = 0
+      for (const it of rows) {
+        const key = normalise(it.text)
+        if (!key || key === normalise(PLACEHOLDER)) continue
+        // 本子里已经有同一句 → 留原位置那条（最早的那条），不动已有措辞
+        if (have.has(key)) { dup += 1; continue }
+        const r = insertQuote(source, it.text, it.note, it.context, '', it.date)
+        if (r.added) {
+          source = dropPlaceholder(r.content)
+          have.add(key)
+          n += 1
+        }
+      }
+      if (n) await writeAtomic(file, source)
+      return { n, dup }
+    })
+    added += result.n
+    skipped += result.dup
+  }
+  await saveConfig({
+    migratedLegacy: true,
+    legacyMigratedAt: new Date().toISOString(),
+    legacySource: legacyPath,
+  })
+  return { ok: true, added, skipped, dir, legacyPath }
+}
+
+/** 把只有占位句 / 空壳的本子挪进 dir/.trash-empty（不删，留个后路）。 */
+export async function pruneEmptyBooks(dir) {
+  const moved = []
+  let names = []
+  try { names = await readdir(dir) } catch { return moved }
+  const trashDir = join(dir, '.trash-empty')
+  for (const n of names) {
+    if (!n.toLowerCase().endsWith('.md')) continue
+    const file = join(dir, n)
+    let body = ''
+    try { body = await readFile(file, 'utf8') } catch { continue }
+    const real = parseQuotes(body).some((it) => {
+      const t = String(it.text || '').trim()
+      return t && t !== PLACEHOLDER
+    })
+    if (real) continue
+    try {
+      await mkdir(trashDir, { recursive: true })
+      await rename(file, join(trashDir, n))
+      moved.push(n)
+    } catch { /* 挪不动就算了 */ }
+  }
+  return moved
+}
+
 export function apply(ctx) {
+  /* ---------- 启动时收拾一次：搬旧单文件、清空壳本 ---------- */
+
+  // 都不阻塞加载，失败也不影响面板和工具。
+  ctx.effect(() => {
+    let alive = true
+    ;(async () => {
+      try { await migrateLegacyOnce() } catch { /* 迁移失败不影响用 */ }
+      if (!alive) return
+      try { await pruneEmptyBooks(await quotesDir()) } catch { /* 同上 */ }
+    })()
+    return () => { alive = false }
+  })
+
   /* ---------- the shared operation ---------- */
 
   /** conv 为空 → 老的单文件（“全部对话”）；否则用该对话自己的文件。 */
@@ -727,7 +821,19 @@ async function sessionTitleOf(sessionId) {
    * 找不到才按会话标题（或给定名字）建一本并打上标记。
    * 以后会话改名、书改名都不会再凭名字去认书。
    */
-  const sessionBook = async (dir, sidKey, fallbackName) => {
+  /** 只留一本的模式：所有会话都写配置里那一本，不再按会话分本（免得越用越多）。 */
+  const singleBookName = async () => {
+    const cfg = (await readJson(configCandidates()[0])) || {}
+    if (!cfg.singleBook) return ''
+    return safeConvName(cfg.title || '') || '鲸语'
+  }
+
+  const sessionBook = async (dir, sidKey, fallbackName, create = true) => {
+    const single = await singleBookName()
+    if (single) {
+      const f = await ensureConvFile(dir, single, true)
+      return { path: f || '', conv: single, blocked: !f }
+    }
     const key = String(sidKey || '').trim()
     const found = key ? await findBySid(dir, key) : ''
     if (found) return { path: found, conv: bookNameOf(dir, found), blocked: false }
@@ -739,6 +845,8 @@ async function sessionTitleOf(sessionId) {
     if (!name) name = '未命名'
     const removedNow = await removedConvList()
     if (removedNow.includes(name)) return { path: '', conv: name, blocked: true }
+    // 只读访问（面板看一眼）不该造出新本：找不到就返回空，等真写了句子再建
+    if (!create) return { path: '', conv: name, blocked: false }
     const exist = dir + '/' + name + '.md'
     let has = false
     try { await stat(exist); has = true } catch { has = false }
@@ -748,10 +856,42 @@ async function sessionTitleOf(sessionId) {
     return { path: file, conv: name, blocked: false }
   }
 
+  /** 这次工具调用属于哪个会话；子会话记到父会话那本里。 */
+  const sessionKeyOf = (exec) => {
+    const agent = exec && exec.agent
+    if (!agent) return ''
+    const header = agent.session && agent.session.header
+    if (header && header.origin === 'subagent' && header.parentSession) return String(header.parentSession).trim()
+    const id = agent.session && agent.session.id ? agent.session.id : agent.id
+    return String(id || '').trim()
+  }
+
+  /**
+   * 工具写句子时该落到哪一本：认 sid、和面板走同一条 sessionBook 解析。
+   * 拿不到 sid 才用 dir 下的「未命名」，**绝不**回落到 config.path 那份旧单文件。
+   */
+  const bookForWrite = async (exec, conversation) => {
+    const dir = await quotesDir()
+    const single = await singleBookName()
+    if (single) {
+      const f = await ensureConvFile(dir, single, true)
+      return { path: f || '', conv: single, blocked: !f }
+    }
+    const sidKey = sessionKeyOf(exec)
+    const conv = safeConvName(conversation)
+    if (sidKey) return await sessionBook(dir, sidKey, conv)
+    const name = conv || '未命名'
+    if ((await removedConvList()).includes(name)) return { path: '', conv: name, blocked: true }
+    const file = await ensureConvFile(dir, name, true)
+    return { path: file || '', conv: name, blocked: !file }
+  }
+
   const listQuotes = async (conv, sid, mode) => {
     const cfgNow = (await readJson(configCandidates()[0])) || {}
     const dir = await quotesDir()
-    const convs = await listConvFiles(dir)
+    const convsAll = await listConvFiles(dir)
+    const singleNow = await singleBookName()
+    const convs = singleNow ? convsAll.filter((n) => n === singleNow) : convsAll
     const sidKey = String(sid || '').trim()
     const wantAll = mode === 'all' || (!mode && !conv && !sidKey)
     let active = ''
@@ -765,11 +905,7 @@ async function sessionTitleOf(sessionId) {
         await writeAtomic(file, repaired)
         source = repaired
       }
-      const real = parseQuotes(source).filter((it) => it.text && it.text.trim() && it.text.trim() !== PLACEHOLDER)
-      if (!real.length) {
-        const migrated = await migrateLegacy(dir, label)
-        if (migrated) source = migrated
-      }
+      // 旧单文件已由 migrateLegacyOnce() 一次性并进各本，这里不再做「空本就去翻 legacy」的懒迁移
       return source
     }
 
@@ -799,7 +935,9 @@ async function sessionTitleOf(sessionId) {
       path = dir
     } else if (mode === 'name' && conv) {
       active = await aliasOf(safeConvName(conv))
-      const file = await ensureConvFile(dir, active)
+      let exists = false
+      try { await stat(dir + '/' + active + '.md'); exists = true } catch { exists = false }
+      const file = exists ? dir + '/' + active + '.md' : ''
       if (file) {
         path = file
         const source = await readBookSource(file, active)
@@ -812,7 +950,7 @@ async function sessionTitleOf(sessionId) {
       }
     } else {
       // 会话视图：sid 才是身份，书名只是标签
-      const book = await sessionBook(dir, sidKey, conv)
+      const book = await sessionBook(dir, sidKey, conv, false)
       active = book.conv
       if (book.path) {
         path = book.path
@@ -827,10 +965,9 @@ async function sessionTitleOf(sessionId) {
     }
 
     const title = typeof cfgNow.title === 'string' && cfgNow.title.trim() ? cfgNow.title.trim() : '鲸语'
-    // 下拉只列「真写过句子」的书；空壳（只有占位句）不占位置，当前这本例外。
+    // 下拉只列「真写过句子」的书；空壳（只有占位句）不占位置。
     const listed = []
     for (const n of convs) {
-      if (active && n === active) { listed.push(n); continue }
       const f = join(dir, n + '.md')
       const cached = await readParsedCached(f).catch(() => null)
       const rows = (cached && Array.isArray(cached.parsed)) ? cached.parsed : []
@@ -863,19 +1000,16 @@ async function sessionTitleOf(sessionId) {
     }
   }
 
-  const appendQuote = async (text, note, context, conversation) => {
+  const appendQuote = async (text, note, context, conversation, exec) => {
     const body = String(text || '').replace(/\s*\n+\s*/g, ' ').trim()
     if (!body) return { ok: false, error: 'text 不能为空' }
-    const convName = safeConvName(conversation)
-    if (convName) {
-      const removedNow = await removedConvList()
-      if (removedNow.includes(convName)) {
-        return { ok: false, error: '这本在回收站里，先从设置里收回来再记' }
-      }
-    }
-    const target = await targetFor(convName, true)
-    const path = target.path
-    const title = target.title
+    // 落到「当前会话那一本」：sid 是身份，书名只是标签。拿不到 sid 也不退回旧单文件。
+    const book = await bookForWrite(exec, conversation)
+    if (book.blocked) return { ok: false, error: '这本在回收站里，先从设置里收回来再记' }
+    if (!book.path) return { ok: false, error: '找不到当前会话的语录本，没地方写（不会退回旧单文件）' }
+    const path = book.path
+    const title = book.conv
+    const convName = conversation ? safeConvName(conversation) : ''
     const label = convName || title
     // 读-改-写整段上锁：两只鱼同时记，后写的不会把前一句吞掉
     const written = await withQuoteLock(path, async () => {
@@ -894,32 +1028,43 @@ async function sessionTitleOf(sessionId) {
       added,
       ...(added ? {} : { reason: reason || 'skipped' }),
       title,
+      conv: title,
       source: path,
       line: formatLine(body, note ? String(note).trim() : '', context ? String(context).trim() : '', conversation ? String(conversation).trim() : ''),
       total: parseQuotes(content).length,
     }
   }
 
-  const removeQuote = async (text, conv) => {
+  const removeQuote = async (text, conv, exec) => {
     const wanted = normalise(text)
     if (!wanted) return { ok: false, error: 'text 不能为空' }
     // 删除不能因为「这本还没建」就顺手建出一个空文件来（之前删未标注对话时就发生过）
     let path = ''
     let source = ''
-    if (conv) {
-      path = (await targetFor(conv)).path
-      try { source = await readFile(path, 'utf8') } catch { source = '' }
+    if (conv || sessionKeyOf(exec)) {
+      const dir = await quotesDir()
+      const sidKey = sessionKeyOf(exec)
+      let file = sidKey ? await findBySid(dir, sidKey) : ''
+      if (!file) {
+        const name = safeConvName(conv)
+        if (name) file = dir + '/' + name + '.md'
+      }
+      if (file) {
+        try {
+          await stat(file)
+          path = file
+          source = await readFile(file, 'utf8')
+        } catch { path = ''; source = '' }
+      }
     }
     const eol = source.includes('\r\n') ? '\r\n' : '\n'
     const lines = source ? source.split(/\r?\n/) : []
     let at = path ? lines.findIndex((l) => l.trim().startsWith('- ') && normalise(splitLine(l)) === wanted) : -1
     if (at === -1) {
-      // 句子可能写在别的对话文件里（例如早期按 sid 落盘但没带对话名），再扫一遍所有文件。
-      // 不带 conv 时 append 写的是 config 里的 legacy 文件（resolveTarget），所以先认它；目录也要用 quotesDir()（会读 config），不能写死 DEFAULT_DIR。
+      // 句子可能写在别的对话文件里（例如早期按 sid 落盘但没带对话名），再扫一遍 dir 下所有本。
+      // 旧单文件 quotes.md 已不再参与读写，这里不认它。
       const quoteDir = await quotesDir()
-      const legacyPath = (await resolveTarget()).path
       const altPaths = []
-      if (legacyPath && legacyPath !== path) altPaths.push(legacyPath)
       let altNames = []
       try { altNames = (await readdir(quoteDir)).filter((n) => n.endsWith('.md')) } catch { altNames = [] }
       for (const name of altNames) {
@@ -952,9 +1097,10 @@ async function sessionTitleOf(sessionId) {
     return { ok: true, removed: splitLine(removed), line: removed, block, source: path, total: parseQuotes(joinLike(lines, source)).length }
   }
 
-  const mergeQuotes = async (conv) => {
-    const { path } = await targetFor(conv)
-    const source = await readSource(path)
+  /** 合并一本里的重复句：同样的句子只留最早那条。 */
+  const mergeBook = async (path) => {
+    let source = ''
+    try { source = await readSource(path) } catch { return { ok: true, dropped: 0, total: 0, source: path } }
     const lines = source.split(/\r?\n/)
     const seen = new Set()
     const kept = []
@@ -972,6 +1118,27 @@ async function sessionTitleOf(sessionId) {
     }
     if (dropped) await writeAtomic(path, joinLike(kept, source))
     return { ok: true, dropped, total: parseQuotes(joinLike(kept, source)).length, source: path }
+  }
+
+  const mergeQuotes = async (conv, exec) => {
+    // 指定了某一本（或带了 sid）就只合那一本；都没指定就把 dir 下每本各合一遍。
+    if (conv || sessionKeyOf(exec)) {
+      const book = await bookForWrite(exec, conv)
+      if (book.blocked || !book.path) return { ok: false, error: '这本在回收站里或还没建' }
+      return mergeBook(book.path)
+    }
+    const dir = await quotesDir()
+    const names = await listConvFiles(dir)
+    let dropped = 0
+    let total = 0
+    let files = 0
+    for (const n of names) {
+      const one = await mergeBook(dir + '/' + n + '.md')
+      dropped += one.dropped
+      total += one.total
+      files += 1
+    }
+    return { ok: true, dropped, total, files, source: dir }
   }
 
   /** Rewrite every `↳ 对话：<from>` line to <to>. Returns how many lines changed. */
@@ -1352,7 +1519,7 @@ async function sessionTitleOf(sessionId) {
       /* ignore */
     }
     return [
-      '【鲸语】你有一个自己的句子本：whale_whisper_append({ text, note?, context?, conversation? }) 记一句，whale_whisper_list 查重/回看，whale_whisper_remove 删一句。',
+      '【鲸语】你有一个自己的句子本：whale_whisper_append({ text, note?, context? }) 记一句（自动写进当前这段对话那一本，不用填书名），whale_whisper_list 查重/回看，whale_whisper_remove 删一句。',
       '只记站得住、想过之后还想再看的话（判断、比喻、认输、承认）；寒暄、进度、汇报不记。',
       '值得说的时候（不是每次）顺带一句「这句我收进鲸语了」。',
       '频率：' + CAPTURE_RULES[level],
@@ -1508,9 +1675,12 @@ async function sessionTitleOf(sessionId) {
               return jsonSend(res, 400, { ok: false, error: '这本在回收站里，先在设置里点「恢复」收回来再记' })
             }
             target = { path: book.path, conv: book.conv, title: conversation }
-          } else {
+          } else if (conversation) {
             // 明确指定了某一本：按书名写，别被当前会话的 sid 抢走
             target = await targetFor(conversation, true)
+          } else {
+            // 既没 sid 也没书名：宁可报错，也不退回旧的单文件
+            return jsonSend(res, 400, { ok: false, error: '没拿到会话，也没有书名——不知道记进哪一本' })
           }
           const path = target.path
           if (!path) {
@@ -1776,7 +1946,7 @@ async function sessionTitleOf(sessionId) {
       name: 'whale_whisper_list',
       description:
         '读回「鲸语」里的句子（最新在前）。动手记之前先看一眼，免得收重复的话；也可以用它确认自己以前记过什么。'
-        + '语录文件由鲸语插件决定（quotes.config.json 里的 path，缺省是作者那份）。',
+        + '句子存在 quotes 目录里、按会话分本（每本文件名就是对话名），这个工具读的是所有本。',
       parameters: {
         limit: { type: 'number', description: '返回几条（默认 20，最大 200）' },
       },
@@ -1798,16 +1968,17 @@ async function sessionTitleOf(sessionId) {
         + '什么时候用：当你说出一句自己觉得站得住、想过之后还想再看一遍的话（一句判断、一个比喻、一次认输、一句承认），'
         + '就在同一层回答里顺手调它，把原句抄进去，能带上文就带上；不收套话、不收解释、不收寒暄。'
         + '已经有一样的句子会跳过（不会重复），写完不用另存，面板立刻能读到。'
+        + '句子会写进「当前这段对话那一本」（按会话 id 认本，和面板共用同一条解析），不会落到别处。'
         + '今天一句都没有也没什么；硬凑出来的那句是凑，不是留。',
       parameters: {
         text: { type: 'string', description: '要收的句子（必填，不含两端的「」也行）' },
         note: { type: 'string', description: '可选批注：为什么会记它，会显示成灰色小字' },
         context: { type: 'string', description: '可选上文：这句话是在什么情况下说的（他会想看到语境）' },
-        conversation: { type: 'string', description: '可选对话名：这句话出自哪段对话，面板按它分组（不填就归到未标注）' },
+        conversation: { type: 'string', description: '可选对话名：一般不填（按当前会话 id 自动认本）；只有在想覆盖成别的本时才填' },
       },
       output: textOutput,
-      async execute(args) {
-        return appendQuote(args?.text, args?.note, args?.context, args?.conversation)
+      async execute(args, exec) {
+        return appendQuote(args?.text, args?.note, args?.context, args?.conversation, exec)
       },
     }),
   )
@@ -1818,10 +1989,11 @@ async function sessionTitleOf(sessionId) {
       description: '从「鲸语」里删掉一句（按整句精确匹配，不会误删旁边那句）。收错了、或者不想留了再用。',
       parameters: {
         text: { type: 'string', description: '要删掉的句子，跟写进去时一致（不含「」和批注）' },
+        conversation: { type: 'string', description: '可选：只想在某一本里删；不填就按当前会话的本子找，找不到再扫所有本' },
       },
       output: textOutput,
-      async execute(args) {
-        return removeQuote(args?.text)
+      async execute(args, exec) {
+        return removeQuote(args?.text, args?.conversation, exec)
       },
     }),
   )
@@ -1835,7 +2007,7 @@ async function sessionTitleOf(sessionId) {
       parameters: {},
       output: textOutput,
       async execute() {
-        return mergeQuotes()
+        return mergeQuotes('')
       },
     }),
   )
