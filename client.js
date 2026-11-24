@@ -977,7 +977,7 @@ function Settings({ title = '', conv = '', book = '', removed = [], trash = [], 
     function Panel(props) {
       const openSettings = !!(props && props.openSettings)
       const sessionId = (props && props.sessionId) || ''
-      const [conv, setConv] = React.useState('')
+      const [conv, setConv] = React.useState(() => (sessionId ? '' : '__all__'))
       const [undoItem, setUndoItem] = React.useState(null)
       const [undoSnap, setUndoSnap] = React.useState('')
       React.useEffect(() => {
@@ -1126,7 +1126,7 @@ function Settings({ title = '', conv = '', book = '', removed = [], trash = [], 
           h(ExportBar, { title, items, name: (conv === '__all__' || !book) ? '鲸语' : book }),
           manualAdd ? h('button', { type: 'button', style: S.btn, onClick: () => { setAddOpen(true); setAddMsg('') } }, '加一句') : null,
           h('select', {
-            value: conv || book || '',
+            value: conv || (sessionId ? (book || '') : '__all__'),
             title: '按对话筛选',
             onChange: (e) => {
               const v = e.target.value
