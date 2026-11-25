@@ -22,6 +22,41 @@ import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
+/**
+ * 路由准入（工单-HTTP路由准入，2026-11-26）。
+ *
+ * 宿主契约：register({ auth }) 的 auth 可以是
+ * 'anonymous' | 'required' | 'deny'，或 (request) => policy；
+ * request 里有 { headers, method, url, transport }。
+ *
+ * 规则：请求带 Origin/Referer 且跟 Host 对不上 → 拒；Origin 是 "null"
+ * （沙箱页面 / data: / file:）→ 拒；没带来源（curl、本地脚本、同源导航）
+ * 或来源就是本服务的 Host → 放行。面板在同源 iframe 里跑，功能不变。
+ */
+export function sameSiteAuth(request) {
+  const headers = request?.headers
+  const read = (name) => {
+    if (!headers) return undefined
+    if (typeof headers.get === 'function') return headers.get(name) ?? undefined
+    const value = headers[name] ?? headers[name.toLowerCase()] ?? headers[name.toUpperCase()]
+    return Array.isArray(value) ? value[0] : value
+  }
+  const host = String(read('host') || '')
+  const source = String(read('origin') || read('referer') || '')
+  if (!source) return 'anonymous'
+  if (source === 'null') return 'deny'
+  try {
+    const url = new URL(source)
+    if (host && url.host === host) return 'anonymous'
+    // 同一个本机服务、但 Host 头缺失（HTTP/1.0、某些本地代理）
+    if (!host && (url.hostname === '127.0.0.1' || url.hostname === 'localhost')) return 'anonymous'
+    return 'deny'
+  } catch {
+    return 'deny'
+  }
+}
+
+
 const ROUTE = '/dsh-quotes.json'
 const CONFIG_ROUTE = '/dsh-quotes.config'
 const REMOVE_ROUTE = '/dsh-quotes.remove'
@@ -785,6 +820,7 @@ async function sessionTitleOf(sessionId) {
   const SELF_ROUTE = '/dsh-quotes.selftest'
   ctx.effect(() =>
     ctx.webServer.register({
+      auth: sameSiteAuth,
       kind: 'exact',
       path: SELF_ROUTE,
       handler: async (req, res) => {
@@ -1312,6 +1348,7 @@ async function sessionTitleOf(sessionId) {
 
   ctx.effect(() =>
     ctx.webServer.register({
+      auth: sameSiteAuth,
       kind: 'exact',
       path: ROUTE,
       handler: async (req, res) => {
@@ -1364,6 +1401,7 @@ async function sessionTitleOf(sessionId) {
 
   ctx.effect(() =>
     ctx.webServer.register({
+      auth: sameSiteAuth,
       kind: 'exact',
       path: CONFIG_ROUTE,
       handler: async (req, res) => {
@@ -1535,6 +1573,7 @@ async function sessionTitleOf(sessionId) {
 
   ctx.effect(() =>
     ctx.webServer.register({
+      auth: sameSiteAuth,
       kind: 'exact',
       path: REMOVE_ROUTE,
       handler: async (req, res) => {
@@ -1586,6 +1625,7 @@ async function sessionTitleOf(sessionId) {
 
   ctx.effect(() =>
     ctx.webServer.register({
+      auth: sameSiteAuth,
       kind: 'exact',
       path: UNDO_ROUTE,
       handler: async (req, res) => {
@@ -1620,6 +1660,7 @@ async function sessionTitleOf(sessionId) {
 
   ctx.effect(() =>
     ctx.webServer.register({
+      auth: sameSiteAuth,
       kind: 'exact',
       path: ADD_ROUTE,
       handler: async (req, res) => {
@@ -1706,6 +1747,7 @@ async function sessionTitleOf(sessionId) {
 
   ctx.effect(() =>
     ctx.webServer.register({
+      auth: sameSiteAuth,
       kind: 'exact',
       path: FAV_ROUTE,
       handler: async (req, res) => {
@@ -1733,6 +1775,7 @@ async function sessionTitleOf(sessionId) {
 
   ctx.effect(() =>
     ctx.webServer.register({
+      auth: sameSiteAuth,
       kind: 'exact',
       path: RENAME_CONV_ROUTE,
       handler: async (req, res) => {
@@ -1755,6 +1798,7 @@ async function sessionTitleOf(sessionId) {
 
   ctx.effect(() =>
     ctx.webServer.register({
+      auth: sameSiteAuth,
       kind: 'exact',
       path: RENAME_CONV_FILE_ROUTE,
       handler: async (req, res) => {
@@ -1778,6 +1822,7 @@ async function sessionTitleOf(sessionId) {
 
   ctx.effect(() =>
     ctx.webServer.register({
+      auth: sameSiteAuth,
       kind: 'exact',
       path: IMPORT_ROUTE,
       handler: async (req, res) => {
@@ -1835,6 +1880,7 @@ async function sessionTitleOf(sessionId) {
 
   ctx.effect(() =>
     ctx.webServer.register({
+      auth: sameSiteAuth,
       kind: 'exact',
       path: ENABLE_ROUTE,
       handler: async (req, res) => {
@@ -1855,6 +1901,7 @@ async function sessionTitleOf(sessionId) {
 
   ctx.effect(() =>
     ctx.webServer.register({
+      auth: sameSiteAuth,
       kind: 'exact',
       path: RM_ROUTE,
       handler: async (req, res) => {
@@ -1876,6 +1923,7 @@ async function sessionTitleOf(sessionId) {
 
   ctx.effect(() =>
     ctx.webServer.register({
+      auth: sameSiteAuth,
       kind: 'exact',
       path: PURGE_ROUTE,
       handler: async (req, res) => {
@@ -1900,6 +1948,7 @@ async function sessionTitleOf(sessionId) {
 
   ctx.effect(() =>
     ctx.webServer.register({
+      auth: sameSiteAuth,
       kind: 'exact',
       path: UPDATE_ROUTE,
       handler: async (req, res) => {
@@ -1914,6 +1963,7 @@ async function sessionTitleOf(sessionId) {
 
   ctx.effect(() =>
     ctx.webServer.register({
+      auth: sameSiteAuth,
       kind: 'exact',
       path: SESSION_ROUTE,
       handler: async (req, res) => {
