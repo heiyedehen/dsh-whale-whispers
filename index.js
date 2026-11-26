@@ -71,7 +71,9 @@ const PURGE_ROUTE = '/dsh-quotes.purge'
 const UPDATE_ROUTE = '/dsh-quotes.update'
 const SESSION_ROUTE = '/dsh-quotes.session'
 const ADD_ROUTE = '/dsh-quotes.add'
-const DEFAULT_PATH = join(homedir(), '.dsh', 'whale-whispers', 'quotes.md')
+// 跟宿主的 DSH_HOME 走：有人把它设到别的盘时，数据和插件不能分家
+const DSH_HOME = process.env.DSH_HOME || join(homedir(), '.dsh')
+const DEFAULT_PATH = join(DSH_HOME, 'whale-whispers', 'quotes.md')
 const DEFAULT_TITLE = '鲸语'
 
 export const inject = ['webServer', 'tools', 'systemPrompt', 'agents']
@@ -84,11 +86,10 @@ async function readJson(path) {
   }
 }
 
-/** Config candidates, most specific first: the user's home, then an old author-side legacy spot. */
+/** Config candidates: under the harness home (DSH_HOME). */
 function configCandidates() {
   return [
-    join(homedir(), '.dsh', 'quotes.config.json'),
-    'D:/dsh work/self/quotes.config.json',
+    join(DSH_HOME, 'quotes.config.json'),
   ]
 }
 
@@ -113,7 +114,7 @@ async function resolveTarget() {
 
 
 
-const DEFAULT_DIR = join(homedir(), '.dsh', 'whale-whispers', 'quotes')
+const DEFAULT_DIR = join(DSH_HOME, 'whale-whispers', 'quotes')
 const PLACEHOLDER = '（这一栏还空着——等我说第一句，或者你手动加一条）'
 
 /** 对话名 → 合法文件名。空名回落到 legacy。 */
@@ -167,7 +168,7 @@ async function quotesDir() {
 
 async function disabledList() {
   try {
-    const parsed = JSON.parse(stripBom(await readFile(join(homedir(), '.dsh', 'quotes.config.json'), 'utf8')))
+    const parsed = JSON.parse(stripBom(await readFile(join(DSH_HOME, 'quotes.config.json'), 'utf8')))
     return Array.isArray(parsed && parsed.disabledConversations) ? parsed.disabledConversations : []
   } catch {
     return []
@@ -1311,7 +1312,7 @@ async function sessionTitleOf(sessionId) {
    * the session whose cache file was written last is, in practice, the one on screen.
    */
   async function readActiveSession() {
-    const dir = join(homedir(), '.dsh', 'storages', 'session_projcache', 'sessions')
+    const dir = join(DSH_HOME, 'storages', 'session_projcache', 'sessions')
     let names = []
     try {
       names = await readdir(dir)
@@ -1514,7 +1515,7 @@ async function sessionTitleOf(sessionId) {
 
   function currentConvSync() {
     try {
-      const dir = join(homedir(), '.dsh', 'storages', 'session_projcache', 'sessions')
+      const dir = join(DSH_HOME, 'storages', 'session_projcache', 'sessions')
       const names = readdirSync(dir).filter((n) => n.endsWith('.json'))
       let best = ''
       let bestM = -1
@@ -1537,7 +1538,7 @@ async function sessionTitleOf(sessionId) {
     let level = 'normal'
     let rule = ''
     try {
-      const cfgPath = join(homedir(), '.dsh', 'quotes.config.json')
+      const cfgPath = join(DSH_HOME, 'quotes.config.json')
       const parsed = JSON.parse(stripBom(readFileSync(cfgPath, 'utf8')))
       if (parsed && CAPTURE_RULES[parsed.captureLevel]) level = parsed.captureLevel
       if (parsed && typeof parsed.captureRule === 'string') rule = parsed.captureRule.trim()
@@ -1549,7 +1550,7 @@ async function sessionTitleOf(sessionId) {
       /* 没配置按 normal */
     }
     try {
-      const cfgPath = join(homedir(), '.dsh', 'quotes.config.json')
+      const cfgPath = join(DSH_HOME, 'quotes.config.json')
       const parsed2 = JSON.parse(stripBom(readFileSync(cfgPath, 'utf8')))
       const cur2 = currentConvSync()
       if (cur2 && parsed2 && Array.isArray(parsed2.disabledConversations) && parsed2.disabledConversations.includes(cur2)) return ''
