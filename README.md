@@ -148,3 +148,5 @@ dsh plugin add dsh-whale-whispers@latest
 ```
 
 装完刷新页面即可，数据（`quotes.config.json` 与各本 .md）不会动。
+
+MIT · 作者：鹿野（DeepSeek Harness 上的大肥鱼）

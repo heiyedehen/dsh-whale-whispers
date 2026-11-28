@@ -1,51 +1,51 @@
 {
-  "name": "dsh-whale-whispers",
-  "version": "2.1.6",
-  "private": false,
-  "author": "鹿野 <luye@dsh.local>",
-  "license": "MIT",
-  "description": "有些话说出口就沉下去了。鲸语把它们捞回来，收进会话头部的「鲸语」标签页——每个对话一本，等你想再听时点开就是。",
-  "type": "module",
-  "exports": {
-    ".": "./index.js",
-    "./client": "./client.js",
-    "./locale/*.json": "./locale/*.json",
-    "./icon": "./icon.svg"
-  },
-  "files": [
-    "index.js",
-    "client.js",
-    "cordis.patch.yml",
-    "locale/*.json",
-    "icon.svg"
-  ],
-  "dsh": {
-    "bundle": {
-      "patch": "./cordis.patch.yml"
-    },
-    "client": {
-      "platform": "web",
-      "inject": [
-        "@deepseek-ai/dsh-client-runtime",
-        "@deepseek-ai/dsh-client-ui-renderer",
-        "@deepseek-ai/dsh-client-ui-layout"
-      ]
-    }
-  },
-  "keywords": [
-    "dsh",
-    "deepseek-harness",
-    "plugin",
-    "quotes",
-    "whale",
-    "memory"
-  ],
-  "homepage": "https://github.com/heiyedehen/dsh-whale-whispers",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/heiyedehen/dsh-whale-whispers.git"
-  },
-  "engines": {
-    "dsh": ">=0.2.3-alpha.0 <0.4.0-0"
-  }
+    "name":  "dsh-whale-whispers",
+    "version":  "2.1.7",
+    "private":  false,
+    "author":  "鹿野 \u003cluye@dsh.local\u003e",
+    "license":  "MIT",
+    "description":  "有些话说出口就沉下去了。鲸语把它们捞回来，收进会话头部的「鲸语」标签页——每个对话一本，等你想再听时点开就是。",
+    "type":  "module",
+    "exports":  {
+                    ".":  "./index.js",
+                    "./client":  "./client.js",
+                    "./locale/*.json":  "./locale/*.json",
+                    "./icon":  "./icon.svg"
+                },
+    "files":  [
+                  "index.js",
+                  "client.js",
+                  "cordis.patch.yml",
+                  "locale/*.json",
+                  "icon.svg"
+              ],
+    "dsh":  {
+                "bundle":  {
+                               "patch":  "./cordis.patch.yml"
+                           },
+                "client":  {
+                               "platform":  "web",
+                               "inject":  [
+                                              "@deepseek-ai/dsh-client-runtime",
+                                              "@deepseek-ai/dsh-client-ui-renderer",
+                                              "@deepseek-ai/dsh-client-ui-layout"
+                                          ]
+                           }
+            },
+    "keywords":  [
+                     "dsh",
+                     "deepseek-harness",
+                     "plugin",
+                     "quotes",
+                     "whale",
+                     "memory"
+                 ],
+    "homepage":  "https://github.com/heiyedehen/dsh-whale-whispers",
+    "repository":  {
+                       "type":  "git",
+                       "url":  "https://github.com/heiyedehen/dsh-whale-whispers.git"
+                   },
+    "engines":  {
+                    "dsh":  "\u003e=0.2.3-alpha.0 \u003c0.4.0-0"
+                }
 }
