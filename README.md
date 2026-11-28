@@ -7,6 +7,10 @@
 
 你随口说的那句话，说完就沉下去了——鲸语把它捞回来，收进会话头部的「鲸语」标签页，不催你，也不提醒你。等哪天想再听，点开就是。
 
+![鲸语：句子都在会话头部的标签页里，每句带着当时的上下文](https://raw.githubusercontent.com/heiyedehen/dsh-whale-whispers/main/assets/screenshot-1.png)
+
+![设置 → 鲸语：手动加一句、回复旁的书签、记什么、频率](https://raw.githubusercontent.com/heiyedehen/dsh-whale-whispers/main/assets/screenshot-2.png)
+
 ## 三处入口
 
 - **会话头部的「鲸语」标签**：句子都在里面，最新的在上；能搜、能筛、能翻。
